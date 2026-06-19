@@ -22,7 +22,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.14"
+          python-version-file: ".python-version"
 
       - name: Update all dependencies
         run: uv sync -U
@@ -32,11 +32,15 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git diff --quiet uv.lock pyproject.toml || (
-            git add uv.lock pyproject.toml &&
-            git commit -m "chore: update dependencies" &&
+
+          if ! git diff --quiet uv.lock pyproject.toml; then
+            git add uv.lock pyproject.toml
+            git commit -m "chore: update dependencies"
             git push
-          )
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Install dependencies for notification
         if: steps.commit.outputs.changed == 'true'
