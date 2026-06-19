@@ -1,0 +1,44 @@
+name: Notify Discord on GitHub Events
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - closed
+  issues:
+    types:
+      - opened
+      - closed
+  issue_comment:
+    types:
+      - created
+
+jobs:
+  notify:
+    name: Send Discord Notification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Notify Discord
+        run: uv run python .github/scripts/notify_github_events.py
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_CICD_WEBHOOK_URL }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

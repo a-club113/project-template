@@ -1,0 +1,58 @@
+name: Update Dependencies
+
+on:
+  # schedule:
+    # - cron: '0 18 * * *'
+  workflow_dispatch:
+
+jobs:
+  update:
+    name: Update uv.lock
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Update all dependencies
+        run: uv sync -U
+
+      - name: Commit and push if changed
+        id: commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git diff --quiet uv.lock pyproject.toml || (
+            git add uv.lock pyproject.toml &&
+            git commit -m "chore: update dependencies" &&
+            git push
+          )
+
+      - name: Install dependencies for notification
+        if: steps.commit.outputs.changed == 'true'
+        run: uv sync --group dev
+
+      - name: Notify Discord
+        if: steps.commit.outcome == 'success'
+        run: |
+          uv run python .github/scripts/notify_discord.py deploy \
+            --status "${{ job.status }}" \
+            --branch "${{ github.ref_name }}" \
+            --commit-sha "$(git rev-parse HEAD)" \
+            --commit-message "chore: update dependencies" \
+            --commit-timestamp "$(git log -1 --format=%cI)" \
+            --run-url "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --actor "${{ github.actor }}" \
+            --function-name "uv.lock / pyproject.toml"
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_CICD_WEBHOOK_URL }}
