@@ -1,0 +1,26 @@
+name: Template Sync
+
+on:
+  schedule:
+    - cron: '0 0 * * 1'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    name: Sync from template repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Sync with template repository
+        uses: AndreasAugustin/actions-template-sync@v2
+        with:
+          github_token: ${{ secrets.TEMPLATE_SYNC_PAT }}
+          source_repo_path: a-club113/project-template
+          upstream_branch: main
+          pr_labels: template-sync
