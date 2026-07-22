@@ -3,5 +3,6 @@
 ## GitHub Secrets
 
 - DISCORD_CICD_WEBHOOK_URL
+- GEMINI_API_KEY
 
-Set this secrets to `Settings` > `Secrets and variables` > `Actions` > `Repository secrets`
+Set these secrets in `Settings` > `Secrets and variables` > `Actions` > `Repository secrets`
