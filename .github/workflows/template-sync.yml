@@ -22,7 +22,8 @@ jobs:
       - name: Sync with template repository
         uses: AndreasAugustin/actions-template-sync@v2
         with:
-          github_token: ${{ secrets.TEMPLATE_SYNC_PAT }}
+          source_gh_token: ${{ secrets.TEMPLATE_SYNC_PAT }}
+          target_gh_token: ${{ secrets.TEMPLATE_SYNC_PAT }}
           source_repo_path: a-club113/project-template
           upstream_branch: main
           pr_labels: template-sync
