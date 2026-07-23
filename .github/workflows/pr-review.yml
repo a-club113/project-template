@@ -32,6 +32,7 @@ jobs:
         run: uv sync
 
       - name: Run PR review
+        working-directory: .github/scripts
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
