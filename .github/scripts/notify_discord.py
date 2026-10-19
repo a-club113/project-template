@@ -1,7 +1,8 @@
 """
     Discord notification script for GitHub Actions CI/CD pipeline results.
 
-    Sends formatted embed notifications to a Discord webhook with test results, coverage information, and deployment status.
+    Sends formatted embed notifications to a Discord webhook with test results, coverage information, deployment status,
+    and dependency update results.
 """
 import os
 import sys
@@ -239,6 +240,88 @@ def _build_deploy_embed(
 
     return embed
 
+def _build_dependencies_embed(
+    status: Literal['success', 'failure', 'cancelled'],
+    branch: str,
+    commit_sha: str,
+    commit_message: str,
+    commit_timestamp: Optional[str],
+    run_url: str,
+    actor: str,
+    updated_files: str,
+    no_changes: bool,
+    rolled_back: bool
+) -> DiscordEmbed:
+    """
+        Builds a Discord embed for dependency update results.
+
+        Args:
+            status (Literal['success', 'failure', 'cancelled']): Job status.
+            branch                                        (str): Git branch name.
+            commit_sha                                    (str): Commit SHA.
+            commit_message                                (str): Commit message.
+            commit_timestamp                              (str): Commit timestamp (ISO 8601).
+            run_url                                       (str): GitHub Actions run URL.
+            actor                                         (str): GitHub actor.
+            updated_files                                 (str): Files the update job may change.
+            no_changes                                   (bool): Whether the dependencies were already up to date.
+            rolled_back                                  (bool): Whether the update was reverted because tests failed.
+
+        Returns:
+            DiscordEmbed: Configured embed instance.
+    """
+    if status == 'success' and no_changes:
+        cfg = STATUS_CONFIG['skipped']
+        title = '⏭️ Dependencies Up to Date'
+    elif status == 'success' and rolled_back:
+        cfg = STATUS_CONFIG['cancelled']
+        title = '↩️ Dependency Update Rolled Back'
+    elif status == 'success':
+        cfg = STATUS_CONFIG['success']
+        title = '📦 Dependencies Updated'
+    elif status == 'cancelled':
+        cfg = STATUS_CONFIG['cancelled']
+        title = f'{cfg["emoji"]} Dependency Update Cancelled'
+    else:
+        cfg = STATUS_CONFIG['failure']
+        title = f'{cfg["emoji"]} Dependency Update Failed'
+
+    short_sha = commit_sha[:7] if commit_sha else 'unknown'
+    short_msg = (commit_message[:72] + '...') if len(commit_message) > 72 else commit_message
+    utc_ts = _parse_commit_timestamp(commit_timestamp)
+
+    embed = DiscordEmbed(title=title, url=run_url, color=cfg['color'])
+
+    if utc_ts:
+        embed.set_timestamp(utc_ts)
+
+    embed.add_embed_field(name='🌿 Branch', value=f'`{branch}`', inline=True)
+    embed.add_embed_field(name='👤 Actor', value=actor, inline=True)
+
+    if status == 'success' and no_changes:
+        embed.add_embed_field(
+            name='ℹ️ Result',
+            value=f'No updates found for {updated_files}',
+            inline=False
+        )
+    elif status == 'success' and rolled_back:
+        embed.add_embed_field(
+            name='🧪 Test Results',
+            value=f'❌ Tests failed with the updated packages, so {updated_files} was restored',
+            inline=False
+        )
+    else:
+        embed.add_embed_field(
+            name='📝 Commit',
+            value=f'[`{short_sha}`]({run_url})\n{short_msg}',
+            inline=False
+        )
+        embed.add_embed_field(name='📦 Updated Files', value=updated_files, inline=False)
+
+    embed.set_footer(text='GitHub Actions • twitter-discord-bot-lambda')
+
+    return embed
+
 def notify_test(args: Namespace) -> None:
     """
         Sends a test result notification to Discord.
@@ -302,6 +385,40 @@ def notify_deploy(args: Namespace) -> None:
 
     logger.info(f'Deploy notification sent successfully (status={args.status}, skipped={args.deploy_skipped})')
 
+def notify_dependencies(args: Namespace) -> None:
+    """
+        Sends a dependency update result notification to Discord.
+
+        Args:
+            args (Namespace): Parsed CLI arguments.
+    """
+    webhook_url = args.webhook_url or os.environ.get('DISCORD_WEBHOOK_URL', '')
+
+    if not webhook_url:
+        logger.error('DISCORD_WEBHOOK_URL is not set.')
+
+        sys.exit(1)
+
+    embed = _build_dependencies_embed(
+        status=args.status,
+        branch=args.branch,
+        commit_sha=args.commit_sha,
+        commit_message=args.commit_message,
+        commit_timestamp=args.commit_timestamp,
+        run_url=args.run_url,
+        actor=args.actor,
+        updated_files=args.updated_files,
+        no_changes=args.no_changes,
+        rolled_back=args.rolled_back
+    )
+
+    send_embed(webhook_url=webhook_url, embed=embed)
+
+    logger.info(
+        f'Dependencies notification sent successfully '
+        f'(status={args.status}, no_changes={args.no_changes}, rolled_back={args.rolled_back})'
+    )
+
 def main() -> None:
     """ Entry point for the Discord notification script. """
     def add_common_args(p: ArgumentParser) -> None:
@@ -338,6 +455,13 @@ def main() -> None:
     deploy_parser.add_argument('--code-size-before', default='', dest='code_size_before')
     deploy_parser.add_argument('--code-size-after', default='', dest='code_size_after')
     deploy_parser.set_defaults(func=notify_deploy)
+
+    dependencies_parser = subparsers.add_parser('dependencies')
+    add_common_args(dependencies_parser)
+    dependencies_parser.add_argument('--updated-files', default='`uv.lock` / `pyproject.toml`', dest='updated_files')
+    dependencies_parser.add_argument('--no-changes', action='store_true', dest='no_changes')
+    dependencies_parser.add_argument('--rolled-back', action='store_true', dest='rolled_back')
+    dependencies_parser.set_defaults(func=notify_dependencies)
 
     args = parser.parse_args()
     args.func(args)

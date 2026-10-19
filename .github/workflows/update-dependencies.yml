@@ -30,36 +30,49 @@ jobs:
       - name: Update all dependencies
         run: uv sync -U
 
-      - name: Commit and push if changed
-        id: commit
+      - name: Check for changes
+        id: diff
+        run: |
+          if git diff --quiet uv.lock pyproject.toml; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run tests with updated dependencies
+        id: test
+        if: steps.diff.outputs.changed == 'true'
+        continue-on-error: true
+        run: uv run pytest
+
+      - name: Roll back dependencies
+        if: steps.test.outcome == 'failure'
+        run: |
+          git checkout -- uv.lock pyproject.toml
+          uv sync
+
+      - name: Commit and push
+        if: steps.test.outcome == 'success'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          if ! git diff --quiet uv.lock pyproject.toml; then
-            git add uv.lock pyproject.toml
-            git commit -m "chore: update dependencies"
-            git push
-            echo "changed=true" >> $GITHUB_OUTPUT
-          else
-            echo "changed=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Install dependencies for notification
-        if: steps.commit.outputs.changed == 'true'
-        run: uv sync --group dev
+          git add uv.lock pyproject.toml
+          git commit -m "chore: update dependencies"
+          git push
 
       - name: Notify Discord
-        if: steps.commit.outcome == 'success'
+        if: always()
         run: |
-          uv run python .github/scripts/notify_discord.py deploy \
+          uv run python .github/scripts/notify_discord.py dependencies \
             --status "${{ job.status }}" \
             --branch "${{ github.ref_name }}" \
             --commit-sha "$(git rev-parse HEAD)" \
-            --commit-message "chore: update dependencies" \
+            --commit-message "$(git log -1 --format=%s)" \
             --commit-timestamp "$(git log -1 --format=%cI)" \
             --run-url "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --actor "${{ github.actor }}" \
-            --function-name "uv.lock / pyproject.toml"
+            ${{ steps.diff.outputs.changed != 'true' && '--no-changes' || '' }} \
+            ${{ steps.test.outcome == 'failure' && '--rolled-back' || '' }}
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_CICD_WEBHOOK_URL }}
