@@ -1,4 +1,4 @@
-name: PR Review (Powered by Gemini)
+name: PR Review (Powered by Copilot)
 
 on:
   pull_request:
@@ -11,34 +11,69 @@ permissions:
   contents: read
   pull-requests: write
 
+env:
+  MAX_DIFF_BYTES: 60000
+
 jobs:
   review:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
+      - name: Set up node
+        uses: actions/setup-node@v6
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v9.0.0
-        with:
-          enable-cache: true
+      - name: Install Copilot CLI
+        run: npm install -g @github/copilot
 
-      - name: Set up python
-        uses: actions/setup-python@v7
-        with:
-          python-version-file: ".python-version"
-
-      - name: Install dependencies
-        run: uv sync
-
-      - name: Run PR review
-        working-directory: .github/scripts
+      - name: Fetch PR diff
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          uv run --no-project \
-            --with requests \
-            --with discord-webhook \
-            python -m pr_review.main
+          gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" > pr.diff
+
+          if [ ! -s pr.diff ]; then
+            echo "EMPTY_DIFF=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          {
+            echo 'Review the following unified diff.'
+            echo
+            echo '```diff'
+            head -c "$MAX_DIFF_BYTES" pr.diff
+            echo
+            echo '```'
+          } > prompt.txt
+
+      - name: Run AI review
+        id: inference
+        if: env.EMPTY_DIFF != 'true'
+        uses: actions/ai-inference@v3
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+        with:
+          model: gpt-4.1
+          prompt-file: prompt.txt
+          system-prompt: >-
+            You are a senior software engineer performing a pull request code review.
+            Point out bugs, security issues, readability problems, and missing tests.
+            Reply in Japanese using Markdown, with concrete and concise bullet points.
+            If no issues are found, say so briefly.
+
+      - name: Post review comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RESPONSE_FILE: ${{ steps.inference.outputs.response-file }}
+        run: |
+          if [ "$EMPTY_DIFF" = 'true' ]; then
+            echo '差分が検出できませんでした。' > comment.md
+          else
+            {
+              echo '## 🤖 自動コードレビュー (Copilot)'
+              echo
+              cat "$RESPONSE_FILE"
+            } > comment.md
+          fi
+
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file comment.md
