@@ -16,6 +16,8 @@
 import os
 import re
 import sys
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from json import load
 from typing import Any, Final, Optional
@@ -42,6 +44,121 @@ COLOR_ERROR: Final[str] = 'ff0000'
 
 EMBED_FIELD_LIMIT: Final[int] = 1000
 
+# Tree drawing parts (same as the `tree` command)
+TREE_BRANCH: Final[str] = '├── '
+TREE_LAST: Final[str] = '└── '
+TREE_PIPE: Final[str] = '│   '
+TREE_SPACE: Final[str] = '    '
+TREE_ROOT: Final[str] = '.'
+TREE_ELLIPSIS: Final[str] = '...'
+CODE_BLOCK_FENCE: Final[str] = '```'
+
+@dataclass
+class _TreeNode:
+    """
+        A node of the changed-file tree.
+
+        Attributes:
+            children (dict[str, _TreeNode]): Child nodes keyed by path segment name.
+            additions       (Optional[int]): Added line count (files only, None for directories).
+            deletions       (Optional[int]): Deleted line count (files only, None for directories).
+    """
+    children: dict[str, _TreeNode] = field(default_factory=dict)
+    additions: Optional[int] = None
+    deletions: Optional[int] = None
+
+    @property
+    def is_file(self) -> bool:
+        """
+            Returns whether this node represents a file.
+
+            Returns:
+                bool: True if the node has diff stats (i.e. it is a file).
+        """
+        return self.additions is not None
+
+def _build_tree(files: Iterable[tuple[str, int, int]]) -> _TreeNode:
+    """
+        Builds a tree structure from changed file paths.
+
+        Args:
+            files (Iterable[tuple[str, int, int]]): Tuples of (file path, additions, deletions).
+
+        Returns:
+            _TreeNode: Root node of the built tree.
+    """
+    root = _TreeNode()
+
+    for filename, additions, deletions in files:
+        *dirs, name = filename.split('/')
+        node = root
+
+        for d in dirs:
+            node = node.children.setdefault(d, _TreeNode())
+
+        leaf = node.children.setdefault(name, _TreeNode())
+        leaf.additions = additions
+        leaf.deletions = deletions
+
+    return root
+
+def _render_tree_lines(node: _TreeNode, prefix: str = '') -> list[str]:
+    """
+        Renders tree nodes as `tree` command style lines recursively.
+
+        Directories are listed before files, each group sorted alphabetically.
+
+        Args:
+            node (_TreeNode): Node whose children are rendered.
+            prefix     (str): Indentation prefix inherited from parent levels.
+
+        Returns:
+            list[str]: Rendered lines.
+    """
+    lines: list[str] = []
+    entries = sorted(node.children.items(), key=lambda kv: (kv[1].is_file, kv[0].lower()))
+
+    for i, (name, child) in enumerate(entries):
+        is_last = i == len(entries) - 1
+        connector = TREE_LAST if is_last else TREE_BRANCH
+
+        if child.is_file:
+            lines.append(f'{prefix}{connector}{name} (+{child.additions} / -{child.deletions})')
+        else:
+            lines.append(f'{prefix}{connector}{name}/')
+            lines.extend(_render_tree_lines(child, prefix + (TREE_SPACE if is_last else TREE_PIPE)))
+
+    return lines
+
+def _format_file_tree(files: Iterable[tuple[str, int, int]], limit: int = EMBED_FIELD_LIMIT) -> str:
+    """
+        Formats changed files as a `tree` command style text wrapped in a code block.
+
+        Lines exceeding the character limit are dropped line by line (not mid-line), and an ellipsis line is appended instead.
+
+        Args:
+            files (Iterable[tuple[str, int, int]]): Tuples of (file path, additions, deletions).
+            limit                            (int): Maximum character count of the tree body.
+
+        Returns:
+            str: Tree text wrapped in a Markdown code block.
+    """
+    lines = [TREE_ROOT, *_render_tree_lines(_build_tree(files))]
+    body: list[str] = []
+    length = 0
+
+    for line in lines:
+        if length + len(line) + 1 > limit - len(TREE_ELLIPSIS) - 1:
+            body.append(TREE_ELLIPSIS)
+            break
+
+        body.append(line)
+        length += len(line) + 1
+
+    tree_text = '\n'.join(body)
+
+    return f'{CODE_BLOCK_FENCE}\n{tree_text}\n{CODE_BLOCK_FENCE}'
+
 def _to_jst(iso_str: str) -> str:
     """
         Converts an ISO 8601 timestamp string to JST HH:MM:SS.
@@ -66,13 +183,11 @@ def _get_commit_files(repo: Repository, commit_sha: str) -> tuple[str, str]:
 
         Returns:
             tuple[str, str]: A tuple containing:
-                - str: files_list
+                - str: files_list (tree formatted, wrapped in a code block)
                 - str: total_changes
     """
     commit = repo.get_commit(commit_sha)
-    files_list = '\n'.join(
-        f'- {f.filename} (+{f.additions} / -{f.deletions})' for f in commit.files
-    )
+    files_list = _format_file_tree((f.filename, f.additions, f.deletions) for f in commit.files)
     total_changes = f'+{commit.stats.additions} / -{commit.stats.deletions}'
 
     return files_list, total_changes
@@ -87,14 +202,12 @@ def _get_pr_files(repo: Repository, pr_number: int) -> tuple[str, str]:
 
         Returns:
             tuple[str, str]: A tuple containing:
-                - str: files_list
+                - str: files_list (tree formatted, wrapped in a code block)
                 - str: total_changes
     """
     pr = repo.get_pull(pr_number)
     files = pr.get_files()
-    files_list = '\n'.join(
-        f'- {f.filename} (+{f.additions} / -{f.deletions})' for f in files
-    )
+    files_list = _format_file_tree((f.filename, f.additions, f.deletions) for f in files)
     total_changes = f'+{pr.additions} / -{pr.deletions}'
 
     return files_list, total_changes
@@ -135,7 +248,7 @@ def _handle_push(event: dict[str, Any], repo: Repository) -> DiscordEmbed:
     embed.add_embed_field(name='🔑 Commit Hash', value=f'`{commit_sha_short}`', inline=True)
     embed.add_embed_field(name='📝 Message', value=commit_msg, inline=False)
     embed.add_embed_field(name='📊 Total Changes', value=total_changes, inline=True)
-    embed.add_embed_field(name='📁 Changed Files', value=truncate(files_changed), inline=False)
+    embed.add_embed_field(name='📁 Changed Files', value=files_changed, inline=False)
     embed.add_embed_field(name='🔗 Diff URL', value=f'[差分を表示する]({diff_url})', inline=False)
 
     return embed
@@ -166,7 +279,7 @@ def _handle_pull_request(event: dict[str, Any], repo: Repository) -> Optional[Di
         embed.add_embed_field(name='📌 Title', value=pr['title'], inline=False)
         embed.add_embed_field(name='👤 Author', value=pr['user']['login'], inline=True)
         embed.add_embed_field(name='📊 Total Changes', value=total_changes, inline=True)
-        embed.add_embed_field(name='📁 Changed Files', value=truncate(files_list), inline=False)
+        embed.add_embed_field(name='📁 Changed Files', value=files_list, inline=False)
         embed.add_embed_field(
             name='🔗 Actions',
             value=(
