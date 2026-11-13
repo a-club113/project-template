@@ -42,17 +42,41 @@ jobs:
       - name: Run tests with updated dependencies
         id: test
         if: steps.diff.outputs.changed == 'true'
-        continue-on-error: true
-        run: uv run pytest
+        run: |
+          # Detect whether any tests exist (pytest exit code 5 = no tests collected)
+          set +e
+          uv run pytest --collect-only -q --no-cov > /dev/null
+          collect_exit=$?
+          set -e
+
+          if [ "$collect_exit" -eq 5 ]; then
+            echo "::notice::No tests found. Skipping tests and applying the update."
+            echo "result=no-tests" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$collect_exit" -ne 0 ]; then
+            # Collection error (e.g. ImportError caused by the updated libraries)
+            echo "::warning::Test collection failed (exit code: $collect_exit). Rolling back the update."
+            echo "result=failed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if uv run pytest --no-cov; then
+            echo "result=passed" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Tests failed with the updated dependencies. Rolling back the update."
+            echo "result=failed" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Roll back dependencies
-        if: steps.test.outcome == 'failure'
+        if: steps.test.outputs.result == 'failed'
         run: |
           git checkout -- uv.lock pyproject.toml
           uv sync
 
       - name: Commit and push
-        if: steps.test.outcome == 'success'
+        if: steps.test.outputs.result == 'passed' || steps.test.outputs.result == 'no-tests'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -73,6 +97,6 @@ jobs:
             --run-url "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --actor "${{ github.actor }}" \
             ${{ steps.diff.outputs.changed != 'true' && '--no-changes' || '' }} \
-            ${{ steps.test.outcome == 'failure' && '--rolled-back' || '' }}
+            ${{ steps.test.outputs.result == 'failed' && '--rolled-back' || '' }}
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_CICD_WEBHOOK_URL }}
